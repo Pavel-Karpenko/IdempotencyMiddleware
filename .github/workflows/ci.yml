@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: ["1.22", "1.23"]
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: idempotency_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (unit)
+        run: go test -race -count=1 ./...
+
+      - name: Test (integration – Redis)
+        env:
+          TEST_REDIS_ADDR: localhost:6379
+        run: go test -race -count=1 -tags integration ./store/redis/...
+
+      - name: Apply Postgres schema
+        env:
+          PGPASSWORD: test
+        run: psql -h localhost -U test -d idempotency_test -f store/postgres/schema.sql
+
+      - name: Test (integration – Postgres)
+        env:
+          TEST_POSTGRES_DSN: postgres://test:test@localhost:5432/idempotency_test
+        run: go test -race -count=1 -tags integration ./store/postgres/...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
